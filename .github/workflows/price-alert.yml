@@ -1,0 +1,69 @@
+name: Price alerts
+
+on:
+  schedule:
+    # Every 3 hours (times are UTC). GitHub may delay scheduled runs by a few minutes.
+    - cron: "17 */3 * * *"
+  workflow_dispatch:
+    inputs:
+      send_summary:
+        description: "Test: email the current price list even if no price dropped"
+        type: boolean
+        default: false
+
+permissions:
+  contents: read
+  issues: write
+
+concurrency:
+  group: rtx5090-price-alert
+  cancel-in-progress: false
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      # Last seen prices live in the Actions cache, so the job never commits to the repo.
+      - name: Restore price history
+        uses: actions/cache/restore@v4
+        with:
+          path: state.json
+          key: price-state-${{ github.run_id }}
+          restore-keys: price-state-
+
+      - run: pip install -r requirements.txt
+
+      - name: Check stock and prices
+        env:
+          ALERT_DIR: ${{ runner.temp }}/alert
+          SEND_SUMMARY: ${{ github.event_name == 'workflow_dispatch' && inputs.send_summary && '1' || '0' }}
+        run: python tracker.py
+
+      # Opening an issue that @mentions the owner makes GitHub email them the alert.
+      - name: Open alert issues
+        env:
+          GH_TOKEN: ${{ github.token }}
+          ALERT_DIR: ${{ runner.temp }}/alert
+          OWNER: ${{ vars.ALERT_MENTION || github.repository_owner }}
+        run: |
+          shopt -s nullglob
+          titles=("$ALERT_DIR"/*.title)
+          [ ${#titles[@]} -gt 0 ] || { echo "No alert this run."; exit 0; }
+          for t in "${titles[@]}"; do
+            { echo "@$OWNER"; echo; cat "${t%.title}.md"; } > "${t%.title}.issue.md"
+            gh issue create --repo "$GITHUB_REPOSITORY" --title "$(cat "$t")" --body-file "${t%.title}.issue.md"
+          done
+
+      - name: Save price history
+        if: always() && hashFiles('state.json') != ''
+        uses: actions/cache/save@v4
+        with:
+          path: state.json
+          key: price-state-${{ github.run_id }}

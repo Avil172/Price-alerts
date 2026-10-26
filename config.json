@@ -1,0 +1,59 @@
+{
+  "products": [
+    {
+      "id": "rtx5090",
+      "name": "RTX 5090",
+      "enabled": true,
+      "search": "rtx 5090",
+      "long_search": "nvidia geforce rtx 5090 graphics card",
+      "match_regex": "rtx\\s*-?\\s*5090(?!\\s*d)",
+      "min_price": 200000,
+      "max_price": 1500000,
+      "shopify_collections": {
+        "elitehubs": "nvidia-rtx-5090-graphic-cards",
+        "vishal": "rtx-5090"
+      }
+    },
+    {
+      "id": "rtx4090",
+      "name": "RTX 4090",
+      "enabled": true,
+      "search": "rtx 4090",
+      "long_search": "nvidia geforce rtx 4090 graphics card",
+      "match_regex": "rtx\\s*-?\\s*4090(?!\\s*d)",
+      "min_price": 100000,
+      "max_price": 1000000
+    }
+  ],
+  "exclude_words": [
+    "laptop",
+    "notebook",
+    "pc build",
+    "custom pc",
+    "desktop",
+    "prebuilt",
+    "bracket",
+    "cable",
+    "waterblock",
+    "water block",
+    "backplate",
+    "riser",
+    "barebone",
+    "ssd",
+    "nvme"
+  ],
+  "stores": {
+    "primeabgb": true,
+    "vedant": true,
+    "elitehubs": true,
+    "vishal": true,
+    "aashirwad": true,
+    "onlineking": true,
+    "nvidia_fe": true,
+    "pcstudio": true,
+    "ezpz": true,
+    "computech": true,
+    "flipkart": true,
+    "amazon": true
+  }
+}
