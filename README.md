@@ -1,73 +1,84 @@
 # Price alerts (India)
 
-A GitHub Actions job (`.github/workflows/price-alert.yml`) checks every product in
-`config.json` (now: RTX 5090 and RTX 4090) across Indian retailers every 30 minutes,
-including out-of-stock listings, and opens a GitHub issue that @mentions you (so
-GitHub emails it to you) when:
+GitHub Actions checks the enabled products in config.json (RTX 5090 and RTX 4090)
+every 30 minutes at minutes 7 and 37. GitHub may delay scheduled runs.
+No ChatGPT/Claude/API calls or subscriptions are used by this repository.
 
-- an out-of-stock listing comes back in stock (**BACK IN STOCK**, with its price), or
-- an in-stock listing drops below the last in-stock price seen for it (**PRICE DROP**).
+A GitHub issue mentions the repository owner when a previously observed sold-out
+listing returns in stock, or an in-stock listing falls below its last observed
+in-stock selling price. The first observation for a new listing is a silent
+baseline. Unchanged prices and unsuccessful checks do not send routine updates.
 
-Nothing is sent otherwise. Each product gets its own issue/email.
-It runs on GitHub's servers: no PC, no email password, no Claude usage.
+## Retailer coverage
 
-## Add a product
+| Stores | Adapter |
+|---|---|
+| PrimeABGB, PCStudio, EZPZ, Aashirwad, NVIDIA official India store | WooCommerce Store API, then storefront HTML |
+| MDComputers, Vedant, TLG Gaming, NationalPC | OpenCart/storefront search with product-card price and stock parsing |
+| EliteHubs, Vishal Peripherals, TechCure India, Hardware Corpus | Shopify collections or predictive search |
+| Clarion, ITGadgetsOnline, ModxComputers, GamesnComps, SCL Gaming, Aarna Computers | WooCommerce Store API, then storefront HTML |
+| Computech Store, Amazon.in, Flipkart | Site-specific search parsers; marketplace access is best effort |
 
-Add an entry to `products` in `config.json`, e.g.:
+A configured store is an attempted source, not a guarantee of successful coverage.
+The Actions run summary lists each store's current result or error. coverage.json
+is also uploaded as an artifact. Collection/search coverage is bounded; stores
+can hide sold-out products, change layouts, cap results, or block cloud IPs.
+Shopify collections are paginated; predictive search returns up to ten results.
 
-```json
-{"id": "rtx5080", "name": "RTX 5080", "enabled": true,
- "search": "rtx 5080", "long_search": "nvidia geforce rtx 5080 graphics card",
- "match_regex": "rtx\\s*-?\\s*5080(?!\\s*(ti|super))", "min_price": 80000, "max_price": 500000}
-```
+## Access and stock handling
 
-- `search`: short term used on store search boxes; `long_search`: used on Amazon/Flipkart.
-- `match_regex`: listing titles must match it (keeps e.g. a 5080 Super out of 5080 alerts).
-- `min_price` / `max_price`: listings outside this range are ignored as placeholders.
-- Optional `shopify_collections`: a store's collection handle when its search is poor.
-- Set `"enabled": false` to pause a product. Its first run is a silent baseline.
+The scraper uses a persistent Chrome-compatible curl_cffi session, cookie warmup,
+and bounded retries. The workflow installs Chromium for an optional Playwright
+fallback. WooCommerce API failures fall back to the public search storefront.
+CAPTCHAs are not solved, certificate validation is not disabled, and no proxy or
+paid scraping service is used. An IP-level block may still require retailer
+permission or an appropriately located runner; a browser alone cannot guarantee access.
 
-## Stores
+Selling prices are extracted separately from crossed-out MRP. Explicit sold-out,
+preorder, backorder, notify-me and enquiry states override generic purchase buttons.
+An unknown stock state does not overwrite the previous observation or trigger an
+alert. A failed/missing listing retains historical state but is excluded from the
+current run's in-stock summary. A newly discovered URL is not labeled a restock.
 
-| Store | How it's read | Reliability |
-|---|---|---|
-| Aashirwad Computers (SP Road, Bangalore, walk-in) | WooCommerce product API (JSON) | Good |
-| Online King (Bangalore) | Store's own product API (JSON) | Good |
-| NVIDIA Founders Edition (official India store) | WooCommerce product API (JSON) | Good |
-| PrimeABGB | WooCommerce product API (JSON) | Blocks GitHub's servers at times |
-| PC Studio | WooCommerce product API (JSON) | Blocks GitHub's servers at times |
-| EZPZ Solutions | WooCommerce product API (JSON) | Good |
-| EliteHubs | Shopify collection (JSON) | Good |
-| Vishal Peripherals | Shopify collection (JSON) | Good |
-| Vedant Computers | Search page HTML | Good |
-| Computech Store | Search page HTML | Good |
-| Flipkart | Search page HTML | OK, layout changes can break it |
-| Amazon.in | Search page HTML | Best effort, often blocks cloud servers |
+Storefront stock/buttons and APIs are evidence from the retailer, not checkout,
+seller-authorisation, warranty or delivery-PIN verification. Review the seller and
+final shipping/taxes before buying. computerselection.shop is deliberately absent.
 
-Not included because they block automated requests: MD Computers, ServerBasket,
-GameLoot. Checked but no RTX listings: TheITDepot, Clarion, PC Planet, TLG Gaming.
-Laptops, prebuilt PCs and accessories are ignored (`exclude_words` in
-`config.json`), and each store can be switched off there.
+## Configuration
 
-To add another shop: if it runs WooCommerce or Shopify, it's one line in
-`STORES` in `tracker.py` using the `woocommerce()` or `shopify()` helper.
+Enable/disable stores under stores in config.json. New adapters have corresponding
+switches there. Products define id, name, enabled, search, long_search, match_regex,
+min_price and max_price; shopify_collections optionally maps a store key to a full
+collection handle. Matching excludes laptops, prebuilt PCs and accessories.
 
-## Setup
+For example, add an RTX 5080 product with a unique id, search "rtx 5080", regex
+"rtx\\s*-?\\s*5080(?!\\s*(ti|super))", and suitable price bounds. A new product starts
+with a silent baseline. Set enabled to false to pause one product.
 
-Nothing to configure. Alerts arrive from notifications@github.com at the email
-set under GitHub → Settings → Notifications → Default notifications email, as
-long as email is ticked for "Participating, @mentions and custom".
-Close the issues as you read them.
+## Alerts and testing
 
-Optional repo variables (**Settings → Secrets and variables → Actions → Variables**):
-- `ALERT_MENTION`: GitHub username to @mention, if not the repo owner.
+GitHub emails the issue mention according to your GitHub notification settings.
+ALERT_MENTION is an optional Actions variable overriding the repository owner.
 
-To test, open **Actions → Price alerts → Run workflow** and tick the
-test box: it opens an issue per product with the current price list.
+Actions -> Price alerts -> Run workflow offers:
+
+- dry_run (default true): fetch live data and show coverage without sending alerts
+  or changing cached price history.
+- send_summary (default false): send the current price list even if no price drops;
+  this has an effect only when dry_run is false.
+
+Scheduled runs remain live. Validation pushes on fix/retailer-access are dry runs.
+Every run first executes the parser/history regression tests. State remains in
+Actions cache and is not committed to the repository.
 
 ## Run locally
 
-```
-pip install -r requirements.txt
-SEND_SUMMARY=1 python tracker.py
-```
+Run these from your assigned working folder:
+
+    pip install -r requirements.txt
+    python -m playwright install chromium
+    python -m unittest test_tracker -v
+
+Set ENABLE_BROWSER_FALLBACK=1 and DRY_RUN=1 before running python tracker.py for a
+live diagnostic without notifications or state changes. Remove DRY_RUN for normal
+monitoring. Set SEND_SUMMARY=1 only when an intentional full summary is wanted.
