@@ -17,6 +17,29 @@ def item(price=900000, stock=True, url=BASE + "/card"):
 
 
 class ParserTests(unittest.TestCase):
+    def test_clarion_templates_do_not_claim_sold_out(self):
+        html = '''<div class="product-card"><template><span>Out of Stock</span></template>
+        <a class="product-name" href="/card">RTX 5090</a>
+        <div class="product-price"><span class="special-price">₹962,990</span><span class="previous-price">₹1,099,990</span></div>
+        <button title="Add to Cart"></button></div>'''
+        rows, _ = t.parse_cards(html, BASE, "5090")
+        self.assertEqual(rows[0]["price"], 962990)
+        self.assertIs(rows[0]["in_stock"], True)
+
+    def test_mdcomputers_also_polls_sold_out_filter(self):
+        with patch.object(t, "html_catalog", side_effect=[[item()], [item(stock=False, url=BASE + "/soldout")]]) as catalog:
+            rows = t.mdcomputers("rtx 5090")
+        self.assertEqual(len(rows), 2)
+        self.assertIn("stock_status=out", catalog.call_args.kwargs["start_url"])
+        self.assertEqual([row["in_stock"] for row in rows], [True, False])
+
+    def test_clarion_uses_the_current_shop_domain(self):
+        with patch.object(t, "html_catalog", return_value=[]) as catalog:
+            t.clarion("rtx 5090")
+        self.assertEqual(catalog.call_args.args[0], "https://shop.clarioncomputers.in")
+        self.assertEqual(catalog.call_args.args[2], "clarion")
+        self.assertIn("/products?query=5090", catalog.call_args.kwargs["start_url"])
+
     def test_mdcomputers_sale_price_not_mrp(self):
         html = '''<div class="product-grid-item"><h3><a href="/card">MSI RTX 5090 32GB</a></h3>
         <span class="price"><span class="del">₹1,200,000</span><span class="ins">₹903,200</span></span>
