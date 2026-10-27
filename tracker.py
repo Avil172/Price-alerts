@@ -23,29 +23,9 @@ import requests
 from bs4 import BeautifulSoup
 
 HERE = Path(__file__).resolve().parent
-CONFIG = json.loads((HERE / "config.json").read_text())
+CONFIG = json.loads((HERE / "config.json").read_text(encoding="utf-8"))
 STATE_FILE = HERE / "state.json"
 IST = timezone(timedelta(hours=5, minutes=30))
-
-HEADERS = {
-    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
-                  "(KHTML, like Gecko) Chrome/130.0 Safari/537.36",
-    "Accept-Language": "en-IN,en;q=0.9",
-}
-
-
-def get(url, **kw):
-    for attempt in range(3):
-        try:
-            r = requests.get(url, headers=HEADERS, timeout=30, **kw)
-            if r.status_code == 200:
-                return r
-            last = f"HTTP {r.status_code}"
-        except requests.RequestException as e:
-            last = str(e)
-        time.sleep(3 * (attempt + 1))
-    raise RuntimeError(last)
-
 
 def rupees(text):
     m = re.search(r"[\d,]+(?:\.\d+)?", text.replace("₹", " "))
@@ -54,7 +34,7 @@ def rupees(text):
 
 # --- Store adapters. Each returns a list of dicts: title, price, url, in_stock.
 
-def woocommerce(base, query):
+def _woocommerce_api(base, query):
     # WooCommerce Store API: structured JSON, no HTML scraping needed.
     out = []
     for page in range(1, 4):
@@ -64,30 +44,33 @@ def woocommerce(base, query):
             minor = p["prices"].get("currency_minor_unit", 0)
             price = int(p["prices"]["price"] or 0) // (10 ** minor)
             out.append({"title": BeautifulSoup(p["name"], "html.parser").get_text(),
-                        "price": price, "url": p["permalink"], "in_stock": p["is_in_stock"]})
+                        "price": price, "url": p["permalink"], "in_stock": p.get("is_in_stock") is True and p.get("is_purchasable", True) is True and not p.get("is_on_backorder", False)})
         if len(items) < 100:
             break
     return out
 
 
 def shopify(base, key, product):
-    # Shopify exposes every collection as JSON at /collections/<handle>/products.json.
-    # Use the product's collection for this store when config names one, since
-    # Shopify's own search ranks poorly; otherwise fall back to predictive search.
     handle = product.get("shopify_collections", {}).get(key)
     if not handle:
         data = get(f"{base}/search/suggest.json", params={
-            "q": product["search"], "resources[type]": "product", "resources[limit]": 10}).json()
+            "q": product["search"].split()[-1], "resources[type]": "product", "resources[limit]": 10}).json()
         return [{"title": p["title"], "price": rupees(str(p["price"])),
-                 "url": urljoin(base, p["url"].split("?")[0]), "in_stock": p["available"]}
+                 "url": urljoin(base, p["url"].split("?")[0]), "in_stock": p.get("available") is True}
                 for p in data["resources"]["results"]["products"]]
-    data = get(f"{base}/collections/{handle}/products.json", params={"limit": 250}).json()
     out = []
-    for p in data["products"]:
-        for v in p["variants"]:
-            title = p["title"] if v["title"] == "Default Title" else f"{p['title']} ({v['title']})"
-            out.append({"title": title, "price": rupees(v["price"]),
-                        "url": f"{base}/products/{p['handle']}", "in_stock": v["available"]})
+    for page in range(1, 11):
+        products = get(f"{base}/collections/{handle}/products.json", params={"limit": 250, "page": page}).json()["products"]
+        for p in products:
+            for v in p["variants"]:
+                title = p["title"] if v["title"] == "Default Title" else f"{p['title']} ({v['title']})"
+                url = f"{base}/products/{p['handle']}"
+                if len(p["variants"]) > 1:
+                    url += f"?variant={v['id']}"
+                out.append({"title": title, "price": rupees(v["price"]), "url": url,
+                            "sku": v.get("sku"), "in_stock": v.get("available") is True})
+        if len(products) < 250:
+            break
     return out
 
 
@@ -107,22 +90,6 @@ def onlineking(query):
         out.append({"title": p["product_name"], "price": int(price),
                     "url": f"https://onlineking.in/searchlist?keyword={quote_plus(query)}#{p['id']}",
                     "in_stock": (p.get("stock") or 0) > 0})
-    return out
-
-
-def vedant(query):
-    soup = BeautifulSoup(get("https://www.vedantcomputers.com/index.php", params={
-        "route": "product/search", "search": query, "limit": 100}).text, "html.parser")
-    out = []
-    for card in soup.select(".product-thumb"):
-        name = card.select_one(".name a")
-        price = card.select_one(".price-new") or card.select_one(".price-normal")
-        if not name or not price:
-            continue
-        text = card.get_text(" ", strip=True)
-        out.append({"title": name.get_text(strip=True), "price": rupees(price.get_text()),
-                    "url": name["href"].split("?")[0],
-                    "in_stock": bool(re.search(r"Stock:\s*In Stock", text, re.I))})
     return out
 
 
@@ -211,6 +178,237 @@ STORES = {
 }
 
 
+# Browser-compatible transport and conservative public-store adapters.
+# This does not solve CAPTCHAs or use proxies. A blocked site stays a reported failure.
+import atexit
+from urllib.parse import urlparse, urlencode
+from curl_cffi import requests as browser_requests
+
+COVERAGE = {}
+SESSION = browser_requests.Session(impersonate="chrome")
+_BROWSER = None
+_CONTEXTS = {}
+_WARMED = set()
+
+
+def close_browser():
+    global _BROWSER
+    if _BROWSER:
+        pw, browser = _BROWSER
+        browser.close()
+        pw.stop()
+        _BROWSER = None
+
+
+atexit.register(close_browser)
+
+
+def blocked(text):
+    soup = BeautifulSoup(text[:250000], "html.parser")
+    title = soup.title.get_text(" ", strip=True).lower() if soup.title else ""
+    return (any(x in title for x in ("just a moment", "attention required", "access denied", "robot check"))
+            or bool(soup.select_one("form[action*='validateCaptcha'], #challenge-running, #cf-challenge-running")))
+
+
+def browser_get(url):
+    global _BROWSER
+    if os.environ.get("ENABLE_BROWSER_FALLBACK") != "1":
+        raise RuntimeError("browser fallback disabled")
+    from playwright.sync_api import sync_playwright
+    if _BROWSER is None:
+        pw = sync_playwright().start()
+        try:
+            _BROWSER = (pw, pw.chromium.launch(headless=True))
+        except Exception:
+            pw.stop()
+            raise
+    host = urlparse(url).netloc
+    if host not in _CONTEXTS:
+        _CONTEXTS[host] = _BROWSER[1].new_context(locale="en-IN")
+    page = _CONTEXTS[host].new_page()
+    try:
+        response = page.goto(url, wait_until="domcontentloaded", timeout=30000)
+        page.wait_for_timeout(2000)
+        text = page.content()
+        if not response or response.status >= 400 or blocked(text):
+            raise RuntimeError(f"browser HTTP {response.status if response else 'no response'} / access challenge")
+        if "json" in response.headers.get("content-type", ""):
+            text = page.locator("body").inner_text()
+        result = requests.Response()
+        result.status_code, result.url, result.encoding = 200, page.url, "utf-8"
+        result._content = text.encode("utf-8")
+        return result
+    finally:
+        page.close()
+
+
+def get(url, **kw):
+    params = kw.pop("params", None)
+    if params:
+        url += ("&" if "?" in url else "?") + urlencode(params, doseq=True)
+    host = urlparse(url).netloc
+    last = "request failed"
+    for attempt in range(2):
+        try:
+            # The session retains cookies; TLS/HTTP2 match Chrome instead of Python requests.
+            r = SESSION.get(url, timeout=20, headers={"Accept-Language": "en-IN,en;q=0.9"}, **kw)
+            if r.status_code == 200 and not blocked(r.text):
+                return r
+            last = f"HTTP {r.status_code}" + (" / access challenge" if blocked(r.text) else "")
+            if r.status_code in (403, 429, 503) or blocked(r.text):
+                if host not in _WARMED:
+                    _WARMED.add(host)
+                    SESSION.get(f"https://{host}/", timeout=15)
+                else:
+                    break
+            elif r.status_code not in (500, 502, 504):
+                break
+        except Exception as e:
+            last = str(e)[:160]
+        if attempt == 0:
+            time.sleep(1)
+    try:
+        return browser_get(url)
+    except Exception as e:
+        raise RuntimeError(f"{last}; fallback: {e}") from e
+
+
+def stock_status(card):
+    text = card.get_text(" ", strip=True)
+    classes = " ".join(card.get("class", []))
+    if re.search(r"out[\s_-]*of[\s_-]*stock|outofstock|sold[\s_-]*out|notify\s*me|pre[\s-]*order|back[\s-]*order|enquir", text + " " + classes, re.I):
+        return False
+    if re.search(r"\bin\s*stock\b|\binstock\b", text + " " + classes, re.I):
+        return True
+    for button in card.select("button, a, input[type=submit]"):
+        label = " ".join([button.get_text(" ", strip=True), button.get("aria-label", ""), button.get("title", ""), button.get("value", "")])
+        if re.search(r"add\s*to\s*cart|buy\s*now", label, re.I):
+            if not button.has_attr("disabled") and button.get("aria-disabled") != "true" and "disabled" not in button.get("class", []):
+                return True
+    return None
+
+
+def selling_price(card):
+    for selector in (".special-price", ".price-new", ".price ins", ".price .ins", ".price-normal", "[itemprop=price]", ".price", ".product-price"):
+        node = card.select_one(selector)
+        if node:
+            copy = BeautifulSoup(str(node), "html.parser")
+            for old in copy.select("del, .del, .price-old, .previous-price, .price-tax, .woocommerce-price-suffix"):
+                old.decompose()
+            value = node.get("content") or copy.get_text(" ", strip=True)
+            price = rupees(value)
+            if price:
+                return price
+    return None
+
+
+def parse_cards(html, base, query):
+    soup = BeautifulSoup(html, "html.parser")
+    for hidden in soup.select("template, script, style, noscript"):
+        hidden.decompose()
+    cards = soup.select(".product-thumb, .product-grid-item, li.product, .product-small.box, .product-item, .product-card")
+    out = {}
+    token = query.split()[-1]
+    for card in cards:
+        link = card.select_one(".name a, h2 a, h3 a, h4 a, a.product-name, .woocommerce-loop-product__link")
+        if not link:
+            continue
+        title = link.get("title") or link.get_text(" ", strip=True)
+        if not re.search(r"rtx\s*-?\s*" + re.escape(token), title, re.I):
+            img = link.select_one("img[alt]")
+            title = img.get("alt", "") if img else title
+        if token not in title:
+            continue
+        price = selling_price(card)
+        if price is None:
+            continue
+        url = urljoin(base, link.get("href", "")).split("?")[0]
+        if urlparse(url).netloc.removeprefix("www.") != urlparse(base).netloc.removeprefix("www."):
+            continue
+        out[url] = {"title": title, "price": price, "url": url, "in_stock": stock_status(card)}
+    return list(out.values()), soup
+
+
+def html_catalog(base, query, style="woo", start_url=None):
+    if style == "opencart":
+        url = base + "/index.php?" + urlencode({"route": "product/search", "search": query.split()[-1], "limit": 100})
+    else:
+        url = base + "/?" + urlencode({"s": query.split()[-1], "post_type": "product"})
+    url = start_url or url
+    out, visited = {}, set()
+    for _ in range(5):
+        if url in visited:
+            break
+        visited.add(url)
+        items, soup = parse_cards((browser_get(url) if style == "clarion" else get(url)).text, base, query)
+        for item in items:
+            out[item["url"]] = item
+        if not items and not soup.select(".product-thumb, .product-grid-item, li.product, .product-item, .product-card"):
+            if not re.search(r"no products|no results|did not match|there is no product|not found", soup.get_text(" ", strip=True), re.I):
+                raise RuntimeError("unrecognized catalogue layout; not a verified empty result")
+        link = soup.select_one("a[rel=next], a.next.page-numbers, .pagination li.active + li a")
+        if not link:
+            break
+        url = urljoin(base, link["href"])
+        if urlparse(url).netloc != urlparse(base).netloc:
+            break
+    return list(out.values())
+
+
+def woocommerce(base, query):
+    try:
+        items = _woocommerce_api(base, query.split()[-1])
+        # Store API stock is structured evidence; still exclude non-purchasable offers below.
+        return items
+    except Exception as api_error:
+        print(f"    API unavailable ({str(api_error)[:100]}); checking storefront HTML")
+        return html_catalog(base, query)
+
+
+def vedant(query):
+    return html_catalog("https://www.vedantcomputers.com", query, "opencart")
+
+
+def mdcomputers(query):
+    base = "https://mdcomputers.in"
+    rows = html_catalog(base, query, "opencart")
+    # The current store search defaults to IN stock. Its visible stock filter has
+    # a separate catalogue route; poll it too or restocks could never be detected.
+    out_url = base + "/index.php?" + urlencode({
+        "route": "extension/ultimate_filters/module/filter", "module_id": 3188,
+        "search": query.split()[-1], "stock_status": "out", "limit": 100})
+    rows += html_catalog(base, query, "opencart", start_url=out_url)
+    return list({row["url"]: row for row in rows}.values())
+
+
+def clarion(query):
+    base = "https://shop.clarioncomputers.in"
+    url = base + "/products?" + urlencode({"query": query.split()[-1]})
+    return html_catalog(base, query, "clarion", start_url=url)
+
+
+# Extra stores start with a silent baseline. Existing false settings are respected.
+EXTRA_STORES = {
+    "mdcomputers": ("MDComputers", lambda p: mdcomputers(p["search"])),
+    "tlggaming": ("TLG Gaming", lambda p: html_catalog("https://tlggaming.com", p["search"], "opencart")),
+    "nationalpc": ("NationalPC", lambda p: html_catalog("https://nationalpc.in", p["search"], "opencart")),
+    "clarion": ("Clarion Computers", lambda p: clarion(p["search"])),
+    "itgadgetsonline": ("ITGadgetsOnline", lambda p: woocommerce("https://itgadgetsonline.com", p["search"])),
+    "modxcomputers": ("ModxComputers", lambda p: woocommerce("https://modxcomputers.com", p["search"])),
+    "gamesncomps": ("GamesnComps", lambda p: woocommerce("https://gamesncomps.com", p["search"])),
+    "sclgaming": ("SCL Gaming", lambda p: woocommerce("https://sclgaming.in", p["search"])),
+    "aarna": ("Aarna Computers", lambda p: woocommerce("https://aarnacomputers.com", p["search"])),
+    "techcure": ("TechCure India", lambda p: shopify("https://techcureindia.com", "techcure", p)),
+    "hardwarecorpus": ("Hardware Corpus", lambda p: shopify("https://hardwarecorpus.in", "hardwarecorpus", p)),
+}
+STORES.update(EXTRA_STORES)
+for _key in EXTRA_STORES:
+    CONFIG["stores"].setdefault(_key, True)
+for _product in CONFIG["products"]:
+    if _product["id"] == "rtx5090":
+        _product.setdefault("shopify_collections", {}).setdefault("techcure", "rtx-5090-graphics-cards")
+
+
 def matches(product, item):
     t = item["title"].lower()
     excludes = CONFIG["exclude_words"] + product.get("exclude_words", [])
@@ -220,19 +418,27 @@ def matches(product, item):
 
 def collect(product):
     listings, errors = {}, {}
+    statuses = {}
     for key, enabled in CONFIG["stores"].items():
         if not enabled:
             continue
         name, fn = STORES[key]
         try:
-            items = [i for i in fn(product) if matches(product, i)]
+            raw = [i for i in fn(product) if matches(product, i)]
+            unknown = sum(i["in_stock"] is None for i in raw)
+            items = [i for i in raw if i["in_stock"] is not None]
+            if unknown:
+                errors[name] = f"{unknown} listings have unknown stock; prior observations retained"
+                print(f"  {name}: {unknown} unknown-stock listings excluded")
             for i in items:
                 i["store"] = name
                 listings[i["url"]] = i
+            statuses[name] = {"listings": len(items), "in_stock": sum(i["in_stock"] for i in items), "unknown_stock": unknown}
             print(f"  {name}: {len(items)} listings ({sum(i['in_stock'] for i in items)} in stock)")
         except Exception as e:  # one broken store must not stop the others
             errors[name] = str(e)[:200]
             print(f"  {name}: FAILED ({e})")
+    COVERAGE[product["id"]] = {"checked_ist": datetime.now(IST).isoformat(timespec="minutes"), "stores": statuses, "errors": errors}
     return listings, errors
 
 
@@ -258,7 +464,7 @@ def check(product, old):
         last = prev and (prev.get("last_price") or (prev["price"] if prev["in_stock"] else None))
         if item["in_stock"]:
             was_in_stock = prev and prev["in_stock"]
-            if item["store"] in known_stores and not was_in_stock:
+            if prev and item["store"] in known_stores and not was_in_stock:
                 note = f" (last in-stock price {fmt(last)})" if last else ""
                 alerts.append(f"BACK IN STOCK at {fmt(item['price'])}{note} | {item['store']} | {item['title']}\n  {url}")
             elif last and item["price"] < last:
@@ -289,7 +495,7 @@ def check(product, old):
 
 
 def main():
-    state = json.loads(STATE_FILE.read_text()) if STATE_FILE.exists() else {}
+    state = json.loads(STATE_FILE.read_text(encoding="utf-8")) if STATE_FILE.exists() else {}
     products = state.get("products", {})
     for product in CONFIG["products"]:
         if not product.get("enabled", True):
@@ -299,10 +505,24 @@ def main():
         listings, subject, body = check(product, products.get(pid, {}))
         first_run = pid not in products
         products[pid] = listings
-        if subject and not (first_run and os.environ.get("SEND_SUMMARY") != "1"):
+        if subject and os.environ.get("DRY_RUN") != "1" and not (first_run and os.environ.get("SEND_SUMMARY") != "1"):
             send_email(pid, subject, body)
         else:
             print("  no alert")
+    (HERE / "coverage.json").write_text(json.dumps(COVERAGE, indent=2, ensure_ascii=False), encoding="utf-8")
+    report = os.environ.get("GITHUB_STEP_SUMMARY")
+    if report:
+        with open(report, "a", encoding="utf-8") as f:
+            for pid, coverage in COVERAGE.items():
+                f.write(f"\n### {pid} coverage — {coverage['checked_ist']}\n\n| Store | Listings | In stock | Status |\n|---|---:|---:|---|\n")
+                for store in sorted(set(coverage["stores"]) | set(coverage["errors"])):
+                    data = coverage["stores"].get(store, {})
+                    status = coverage["errors"].get(store, "Checked")
+                    status = status.replace("|", "/").replace("\n", " ")
+                    f.write(f"| {store} | {data.get('listings', '—')} | {data.get('in_stock', '—')} | {status} |\n")
+    if os.environ.get("DRY_RUN") == "1":
+        print("Dry run: no alerts sent and no price history changed")
+        return
     STATE_FILE.write_text(json.dumps({"updated": datetime.now(IST).isoformat(timespec="minutes"),
                                       "products": products},
                                      indent=1, ensure_ascii=False, sort_keys=True) + "\n")
