@@ -16,7 +16,8 @@ baseline. Unchanged prices and unsuccessful checks do not send routine updates.
 | PrimeABGB, PCStudio, EZPZ, Aashirwad, NVIDIA official India store | WooCommerce Store API, then storefront HTML |
 | MDComputers, Vedant, TLG Gaming, NationalPC | OpenCart/storefront search with product-card price and stock parsing |
 | EliteHubs, Vishal Peripherals, TechCure India, Hardware Corpus | Shopify collections or predictive search |
-| Clarion, ITGadgetsOnline, ModxComputers, GamesnComps, SCL Gaming, Aarna Computers | WooCommerce Store API, then storefront HTML |
+| ITGadgetsOnline, ModxComputers, GamesnComps, SCL Gaming, Aarna Computers | WooCommerce Store API, then storefront HTML |
+| Clarion Computers (shop.clarioncomputers.in) | Rendered product catalogue; handles current JavaScript templates |
 | Computech Store, Amazon.in, Flipkart | Site-specific search parsers; marketplace access is best effort |
 
 A configured store is an attempted source, not a guarantee of successful coverage.
@@ -36,6 +37,7 @@ permission or an appropriately located runner; a browser alone cannot guarantee 
 
 Selling prices are extracted separately from crossed-out MRP. Explicit sold-out,
 preorder, backorder, notify-me and enquiry states override generic purchase buttons.
+MDComputers is checked through both its in-stock search and separate sold-out filter.
 An unknown stock state does not overwrite the previous observation or trigger an
 alert. A failed/missing listing retains historical state but is excluded from the
 current run's in-stock summary. A newly discovered URL is not labeled a restock.
