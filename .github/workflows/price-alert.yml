@@ -1,12 +1,18 @@
 name: Price alerts
 
 on:
+  push:
+    branches: ["fix/retailer-access"]
   schedule:
     # Every 30 minutes, off the top of the hour. GitHub delays or silently skips
     # scheduled runs under load, so checking often keeps gaps short. Free on public repos.
     - cron: "7,37 * * * *"
   workflow_dispatch:
     inputs:
+      dry_run:
+        description: "Diagnostic only: no alerts or price-history updates"
+        type: boolean
+        default: true
       send_summary:
         description: "Test: email the current price list even if no price dropped"
         type: boolean
@@ -23,7 +29,7 @@ concurrency:
 jobs:
   check:
     runs-on: ubuntu-latest
-    timeout-minutes: 15
+    timeout-minutes: 25
     steps:
       - uses: actions/checkout@v4
 
@@ -41,14 +47,26 @@ jobs:
 
       - run: pip install -r requirements.txt
 
+      - name: Parser and history regression tests
+        run: |
+          python -m py_compile tracker.py test_tracker.py
+          python -m unittest test_tracker -v
+
+      - name: Install Chromium fallback
+        run: python -m playwright install --with-deps chromium
+
       - name: Check stock and prices
         env:
           ALERT_DIR: ${{ runner.temp }}/alert
+          ENABLE_BROWSER_FALLBACK: "1"
+          PYTHONUNBUFFERED: "1"
+          DRY_RUN: ${{ (github.event_name == 'push' || inputs.dry_run) && '1' || '0' }}
           SEND_SUMMARY: ${{ github.event_name == 'workflow_dispatch' && inputs.send_summary && '1' || '0' }}
         run: python tracker.py
 
       # Opening an issue that @mentions the owner makes GitHub email them the alert.
       - name: Open alert issues
+        if: github.event_name != 'push' && !inputs.dry_run
         env:
           GH_TOKEN: ${{ github.token }}
           ALERT_DIR: ${{ runner.temp }}/alert
@@ -63,8 +81,16 @@ jobs:
           done
 
       - name: Save price history
-        if: always() && hashFiles('state.json') != ''
+        if: always() && github.event_name != 'push' && !inputs.dry_run && hashFiles('state.json') != ''
         uses: actions/cache/save@v4
         with:
           path: state.json
           key: price-state-${{ github.run_id }}
+      - name: Upload coverage report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: retailer-coverage-${{ github.run_id }}
+          path: coverage.json
+          if-no-files-found: ignore
+          retention-days: 14
