@@ -23,8 +23,8 @@ permissions:
   issues: write
 
 concurrency:
-  group: rtx5090-price-alert
-  cancel-in-progress: false
+  group: rtx5090-price-alert-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'push' }}
 
 jobs:
   check:
