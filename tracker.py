@@ -281,7 +281,7 @@ def stock_status(card):
     if re.search(r"\bin\s*stock\b|\binstock\b", text + " " + classes, re.I):
         return True
     for button in card.select("button, a, input[type=submit]"):
-        label = " ".join([button.get_text(" ", strip=True), button.get("aria-label", ""), button.get("value", "")])
+        label = " ".join([button.get_text(" ", strip=True), button.get("aria-label", ""), button.get("title", ""), button.get("value", "")])
         if re.search(r"add\s*to\s*cart|buy\s*now", label, re.I):
             if not button.has_attr("disabled") and button.get("aria-disabled") != "true" and "disabled" not in button.get("class", []):
                 return True
@@ -289,11 +289,11 @@ def stock_status(card):
 
 
 def selling_price(card):
-    for selector in (".price-new", ".price ins", ".price .ins", ".price-normal", "[itemprop=price]", ".price"):
+    for selector in (".special-price", ".price-new", ".price ins", ".price .ins", ".price-normal", "[itemprop=price]", ".price", ".product-price"):
         node = card.select_one(selector)
         if node:
             copy = BeautifulSoup(str(node), "html.parser")
-            for old in copy.select("del, .del, .price-old, .price-tax, .woocommerce-price-suffix"):
+            for old in copy.select("del, .del, .price-old, .previous-price, .price-tax, .woocommerce-price-suffix"):
                 old.decompose()
             value = node.get("content") or copy.get_text(" ", strip=True)
             price = rupees(value)
@@ -304,11 +304,13 @@ def selling_price(card):
 
 def parse_cards(html, base, query):
     soup = BeautifulSoup(html, "html.parser")
-    cards = soup.select(".product-thumb, .product-grid-item, li.product, .product-small.box, .product-item")
+    for hidden in soup.select("template, script, style, noscript"):
+        hidden.decompose()
+    cards = soup.select(".product-thumb, .product-grid-item, li.product, .product-small.box, .product-item, .product-card")
     out = {}
     token = query.split()[-1]
     for card in cards:
-        link = card.select_one(".name a, h2 a, h3 a, h4 a, .woocommerce-loop-product__link")
+        link = card.select_one(".name a, h2 a, h3 a, h4 a, a.product-name, .woocommerce-loop-product__link")
         if not link:
             continue
         title = link.get("title") or link.get_text(" ", strip=True)
@@ -327,20 +329,21 @@ def parse_cards(html, base, query):
     return list(out.values()), soup
 
 
-def html_catalog(base, query, style="woo"):
+def html_catalog(base, query, style="woo", start_url=None):
     if style == "opencart":
         url = base + "/index.php?" + urlencode({"route": "product/search", "search": query.split()[-1], "limit": 100})
     else:
         url = base + "/?" + urlencode({"s": query.split()[-1], "post_type": "product"})
+    url = start_url or url
     out, visited = {}, set()
     for _ in range(5):
         if url in visited:
             break
         visited.add(url)
-        items, soup = parse_cards(get(url).text, base, query)
+        items, soup = parse_cards((browser_get(url) if style == "clarion" else get(url)).text, base, query)
         for item in items:
             out[item["url"]] = item
-        if not items and not soup.select(".product-thumb, .product-grid-item, li.product, .product-item"):
+        if not items and not soup.select(".product-thumb, .product-grid-item, li.product, .product-item, .product-card"):
             if not re.search(r"no products|no results|did not match|there is no product|not found", soup.get_text(" ", strip=True), re.I):
                 raise RuntimeError("unrecognized catalogue layout; not a verified empty result")
         link = soup.select_one("a[rel=next], a.next.page-numbers, .pagination li.active + li a")
@@ -367,7 +370,21 @@ def vedant(query):
 
 
 def mdcomputers(query):
-    return html_catalog("https://mdcomputers.in", query, "opencart")
+    base = "https://mdcomputers.in"
+    rows = html_catalog(base, query, "opencart")
+    # The current store search defaults to IN stock. Its visible stock filter has
+    # a separate catalogue route; poll it too or restocks could never be detected.
+    out_url = base + "/index.php?" + urlencode({
+        "route": "extension/ultimate_filters/module/filter", "module_id": 3188,
+        "search": query.split()[-1], "stock_status": "out", "limit": 100})
+    rows += html_catalog(base, query, "opencart", start_url=out_url)
+    return list({row["url"]: row for row in rows}.values())
+
+
+def clarion(query):
+    base = "https://shop.clarioncomputers.in"
+    url = base + "/products?" + urlencode({"query": query.split()[-1]})
+    return html_catalog(base, query, "clarion", start_url=url)
 
 
 # Extra stores start with a silent baseline. Existing false settings are respected.
@@ -375,7 +392,7 @@ EXTRA_STORES = {
     "mdcomputers": ("MDComputers", lambda p: mdcomputers(p["search"])),
     "tlggaming": ("TLG Gaming", lambda p: html_catalog("https://tlggaming.com", p["search"], "opencart")),
     "nationalpc": ("NationalPC", lambda p: html_catalog("https://nationalpc.in", p["search"], "opencart")),
-    "clarion": ("Clarion Computers", lambda p: woocommerce("https://www.clarioncomputers.in", p["search"])),
+    "clarion": ("Clarion Computers", lambda p: clarion(p["search"])),
     "itgadgetsonline": ("ITGadgetsOnline", lambda p: woocommerce("https://itgadgetsonline.com", p["search"])),
     "modxcomputers": ("ModxComputers", lambda p: woocommerce("https://modxcomputers.com", p["search"])),
     "gamesncomps": ("GamesnComps", lambda p: woocommerce("https://gamesncomps.com", p["search"])),
