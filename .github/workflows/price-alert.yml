@@ -2,8 +2,9 @@ name: Price alerts
 
 on:
   schedule:
-    # Every 3 hours (times are UTC; 17 past = :47 IST). GitHub may delay runs.
-    - cron: "17 */3 * * *"
+    # Every 30 minutes, off the top of the hour. GitHub delays or silently skips
+    # scheduled runs under load, so checking often keeps gaps short. Free on public repos.
+    - cron: "7,37 * * * *"
   workflow_dispatch:
     inputs:
       send_summary:

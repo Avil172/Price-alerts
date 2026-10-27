@@ -1,7 +1,7 @@
 # Price alerts (India)
 
 A GitHub Actions job (`.github/workflows/price-alert.yml`) checks every product in
-`config.json` (now: RTX 5090 and RTX 4090) across Indian retailers every 3 hours,
+`config.json` (now: RTX 5090 and RTX 4090) across Indian retailers every 30 minutes,
 including out-of-stock listings, and opens a GitHub issue that @mentions you (so
 GitHub emails it to you) when:
 
