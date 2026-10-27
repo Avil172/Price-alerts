@@ -11,7 +11,8 @@
       "max_price": 1500000,
       "shopify_collections": {
         "elitehubs": "nvidia-rtx-5090-graphic-cards",
-        "vishal": "rtx-5090"
+        "vishal": "rtx-5090",
+        "techcure": "rtx-5090-graphics-cards"
       }
     },
     {
@@ -54,6 +55,17 @@
     "ezpz": true,
     "computech": true,
     "flipkart": true,
-    "amazon": true
+    "amazon": true,
+    "mdcomputers": true,
+    "tlggaming": true,
+    "nationalpc": true,
+    "clarion": true,
+    "itgadgetsonline": true,
+    "modxcomputers": true,
+    "gamesncomps": true,
+    "sclgaming": true,
+    "aarna": true,
+    "techcure": true,
+    "hardwarecorpus": true
   }
 }
